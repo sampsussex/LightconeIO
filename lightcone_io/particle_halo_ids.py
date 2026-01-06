@@ -25,10 +25,12 @@ import virgo.mpi.util as mpi_util
 FRACTIONAL_RADIUS=0
 MOST_MASSIVE=1
 LEAST_MASSIVE=2
+MASS_WEIGHTED=3 # WILL UPDATES: I have added this option to assign overlapping particles by mass or any other halo property
 overlap_methods = {
     "fractional-radius" : FRACTIONAL_RADIUS,
     "most-massive"      : MOST_MASSIVE,
     "least-massive"     : LEAST_MASSIVE,
+    "mass-weighted"     : MASS_WEIGHTED,
     }
 
 
@@ -50,18 +52,31 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
 
     # Parallel read the halo catalogue: need (x,y,z), snapnum, id
     message("Reading lightcone halo catalogue")
-    halo_lightcone_datasets = ("LightconeXcminpot", "LightconeYcminpot", "LightconeZcminpot", "SnapNum", "ID")
+
+    #halo_lightcone_datasets = ("LightconeXcminpot", "LightconeYcminpot", "LightconeZcminpot", "SnapNum", "ID")
+    #mf = phdf5.MultiFile(args.halo_lightcone_filenames, file_nr_attr=("Header", "NumberOfFiles"), comm=comm)
+    #halo_lightcone_data = mf.read(halo_lightcone_datasets, group="Subhalo", read_attributes=True)
+    
+    # WILL UPDATES: Update to read in halo lightcone as they are currently constructed.
+    # The main changes are therefore in the names of the properties and that the coordinates of the halo in the lightcone are now an nx3 array as opposed to 3 1D arrays. 
+    # you will need to update all instances where the old property names are used: "Pos_minpot" -> "Lightcone/HaloCentre",  "SnapNum" -> "SnapshotNumber", ect...
+    # I have now also included the SOAP index, this will allow you to now read in the 
+
+    halo_lightcone_datasets = ("Lightcone/HaloCentre", "Lightcone/SnapshotNumber", "InputHalos/HaloCatalogueIndex","InputHalos/SOAPIndex") 
     mf = phdf5.MultiFile(args.halo_lightcone_filenames, file_nr_attr=("Header", "NumberOfFiles"), comm=comm)
-    halo_lightcone_data = mf.read(halo_lightcone_datasets, group="Subhalo", read_attributes=True)
+    halo_lightcone_data = mf.read(halo_lightcone_datasets, group="/", read_attributes=True)
+
 
     # Store index in halo lightcone of each halo
-    nr_local_halos = len(halo_lightcone_data["ID"])
+    #nr_local_halos = len(halo_lightcone_data["ID"])
+    nr_local_halos = len(halo_lightcone_data["InputHalos/HaloCatalogueIndex"]) # WILL UPDATES: update property name "ID" -> "InputHalos/HaloCatalogueIndex"
     offset = comm.scan(nr_local_halos) - nr_local_halos
     halo_lightcone_data["IndexInHaloLightcone"] = np.arange(nr_local_halos, dtype=int) + offset
 
     # Repartition halos for better load balancing
     message("Repartition halo catalogue")
-    nr_local_halos = len(halo_lightcone_data["ID"])
+    #nr_local_halos = len(halo_lightcone_data["ID"])
+    nr_local_halos = len(halo_lightcone_data["InputHalos/HaloCatalogueIndex"]) # WILL UPDATES: update property name
     nr_total_halos = comm.allreduce(nr_local_halos)
     nr_desired = np.zeros(comm_size, dtype=int)
     nr_desired[:] = nr_total_halos // comm_size
@@ -70,15 +85,17 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
     for name in halo_lightcone_data:
         halo_lightcone_data[name] = psort.repartition(halo_lightcone_data[name], nr_desired, comm=comm)
 
+    # WILL UPDATES: no longer needed, we will now change all occurances of "Pos_minpot" -> "Lightcone/HaloCentre"
     # Merge x/y/z into a single array
-    halo_pos = np.column_stack((halo_lightcone_data["LightconeXcminpot"],
-                                halo_lightcone_data["LightconeYcminpot"],
-                                halo_lightcone_data["LightconeZcminpot"]))
-    del halo_lightcone_data["LightconeXcminpot"]
-    del halo_lightcone_data["LightconeYcminpot"]
-    del halo_lightcone_data["LightconeZcminpot"]
-    halo_lightcone_data["Pos_minpot"] = halo_pos 
-    del halo_pos
+    #halo_pos = np.column_stack((halo_lightcone_data["LightconeXcminpot"],
+    #                            halo_lightcone_data["LightconeYcminpot"],
+    #                            halo_lightcone_data["LightconeZcminpot"]))
+    #del halo_lightcone_data["LightconeXcminpot"]
+    #del halo_lightcone_data["LightconeYcminpot"]
+    #del halo_lightcone_data["LightconeZcminpot"]
+    #halo_lightcone_data["Pos_minpot"] = halo_pos 
+    #del halo_pos
+    
 
     # The input catalogue is ordered by redshift, but we want a mix of redshifts on each rank
     message("Reassign halos to MPI ranks")
@@ -91,7 +108,8 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
 
     # Sort locally by snapnum
     message("Sorting local lightcone halos by snapshot")
-    order = np.argsort(halo_lightcone_data["SnapNum"])
+    #order = np.argsort(halo_lightcone_data["SnapNum"])
+    order = np.argsort(halo_lightcone_data["Lightcone/SnapshotNumber"]) # WILL UPDATES: update property name
     for name in halo_lightcone_data:
         halo_lightcone_data[name] = halo_lightcone_data[name][order,...]
 
@@ -124,13 +142,27 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
     # Loop over snapshots
     for snapnum in unique_snap_all:
 
+        # WILL UPDATES: this will have to be updated to work with HBT-SOAP. 
+        #       If you are not using a soap parameter for the radius_name, you should not remove the radius_name from the soap_datasets list, but istead we will use a set radius for its attributes. 
+        #       e.g. soap_datasets = ("InputHalos/HaloCatalogueIndex", "BoundSubhalo/EncloseRadius", mass_name)
         # Datasets to read from SOAP
-        soap_datasets = ("VR/ID", radius_name, mass_name)
+        #soap_datasets = ("VR/ID", radius_name, mass_name) 
+        soap_datasets = ("InputHalos/HaloCatalogueIndex", radius_name, mass_name)
+
+
 
         # Read the SOAP catalogue for this snapshot
         message(f"Reading SOAP output for snapshot {snapnum}")
         mf = phdf5.MultiFile(args.soap_filenames % {"snap_nr" : snapnum}, file_idx=(0,), comm=comm)
         soap_data = mf.read(soap_datasets, read_attributes=True)
+
+        # WILL UPDATES: if using physical distance for radius instead of SOAP property
+        #       nr_haloes = len(soap_data["InputHalos/HaloCatalogueIndex"])
+        #       soap_data["SearchRadius"] = np.ones(len(nr_haloes)) * physical_radius * soap_data["BoundSubhalo/EncloseRadius"].units
+        #for k, v in soap_data["BoundSubhalo/EncloseRadius"].attrs.items():
+        #   soap_data["SearchRadius"].attrs[k]=v
+        # del soap_data["BoundSubhalo/EncloseRadius"]
+        # radius_name="SearchRadius" # update radius_name
 
         # Get the expansion factor of this snapshot
         if comm_rank == 0:
@@ -149,7 +181,10 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
         i1 = snap_offset_all[snapnum-min_snap]
         i2 = snap_offset_all[snapnum-min_snap] + snap_count_all[snapnum-min_snap]
         assert np.all(halo_lightcone_data["SnapNum"][i1:i2] == snapnum)
-        ptr = psort.parallel_match(halo_lightcone_data["ID"][i1:i2], soap_data["VR/ID"], comm=comm)
+
+        # WILL UPDATES: we have already done the matching step by reading in the "InputHalos/SOAPIndex" so we can replace it
+        #ptr = psort.parallel_match(halo_lightcone_data["ID"][i1:i2], soap_data["VR/ID"], comm=comm)
+        ptr = halo_lightcone_data["InputHalos/SOAPIndex"][i1:i2]
         assert np.all(ptr>=0) # All halos in the lightcone should be found in SOAP
 
         # Allocate storage for radii now that we know what dtype SOAP uses
@@ -183,7 +218,8 @@ def read_lightcone_index(args):
     """
     
     # Particle types which may be in the lightcone:
-    type_names = ("BH", "DM", "Gas", "Neutrino", "Stars")
+    type_names = ("BH", "DM", "Gas", "Neutrino", "Stars") # WILL UPDATES: remove the particle types you don't care about
+
     type_z_range = {}
 
     # Now, find the lightcone particle output and read the index info
@@ -374,8 +410,9 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
         r_part_2 = np.sum((part_pos[idx,:] - halo_pos[i,:])**2.0, axis=1)
         
         # Compute ((particle radius)/(halo radius))**2
-        r_frac_2 = r_part_2 / (halo_radius[i]**2)
 
+        r_frac_2 = r_part_2 / (halo_radius[i]**2) 
+        
         # Identify particles to update
         if overlap_method == FRACTIONAL_RADIUS:
             # Assign particles to this halo if (particle radius)/(halo radius) is smaller
@@ -389,6 +426,15 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
             # Assign particles to this halo if this is the least massive halo the particle
             # has been found to be in so far
             to_update = (halo_mass[i] < part_halo_mass[idx])
+        elif overlap_method == MASS_WEIGHTED: # WILL UPDATES
+            # Assign particles to this halo if (particle radius)/(halo mass) is smaller
+            # than the smallest value so far
+            r_part_2_no_frac = r_part_2 * (halo_radius[i]**2)
+            other_halo_mass = part_halo_mass[idx] 
+            other_halo_mass[other_halo_mass < -1] = 0 # include to account for -1 vaues of halo masses that have not been assigned yet.
+            to_update = ((r_part_2_no_frac/halo_mass[i]) < (r_part_2_no_frac/part_halo_mass[idx])) 
+            del r_part_2_no_frac
+            del other_halo_mass
         else:
             raise ValueError("Unrecognized value of overlap_method")        
         idx = idx[to_update]
@@ -438,9 +484,12 @@ def main(args):
     message(f"Halo radius definition: {args.soap_so_name}")
 
     # Read in position and radius for halos in the lightcone
-    radius_name = f"{args.soap_so_name}/SORadius"
+    #  WILL UPDATES: radius_name and mass_name will need to be changed to not only include SO values (centrals only)
+    #  radius name a) I would set the radius name to None and instead just use a physical apature or b) use another radius that is a SOAP property but not only for centrals e.g.) BoundSubhalo/EncloseRadius
+    #  mass_name b) If you still want to use a mass to weight how overlapping particles are allocated you will either have to use the BoundSubhalo/TotalMass or some other proxy like BoundSubhalo/MaximumCircularVelocity.
+    radius_name = f"{args.soap_so_name}/SORadius" 
     mass_name = f"{args.soap_so_name}/TotalMass"
-    halo_lightcone_data = read_lightcone_halo_positions_and_radii(args, radius_name, mass_name)
+    halo_lightcone_data = read_lightcone_halo_positions_and_radii(args, radius_name, mass_name) 
 
     # Locate the particle data
     type_z_range, all_particle_files = read_lightcone_index(args)
@@ -485,8 +534,9 @@ def main(args):
 
         # Assign group indexes to the particles
         message("Assigning group indexes")
-        halo_id = halo_lightcone_data["IndexInHaloLightcone"]
-        halo_pos = halo_lightcone_data["Pos_minpot"]
+        halo_id = halo_lightcone_data["IndexInHaloLightcone"] # we need this. 
+        #halo_pos = halo_lightcone_data["Pos_minpot"] 
+        halo_pos = halo_lightcone_data["Lightcone/HaloCentre"] # WILL UPDATES: update property name for new halo lightcone format
         halo_radius = halo_lightcone_data[radius_name]
         halo_mass = halo_lightcone_data[mass_name]
         part_halo_id, part_halo_mass, part_halo_r_frac = compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part_pos, overlap_method)
