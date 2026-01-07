@@ -99,7 +99,7 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
 
     # The input catalogue is ordered by redshift, but we want a mix of redshifts on each rank
     message("Reassign halos to MPI ranks")
-    nr_local_halos = len(halo_lightcone_data["ID"])
+    nr_local_halos = len(halo_lightcone_data["InputHalos/HaloCatalogueIndex"])
     rng = np.random.default_rng()
     sort_key = rng.integers(comm_size, size=nr_local_halos, dtype=np.int32)
     order = psort.parallel_sort(sort_key, comm=comm, return_index=True)
@@ -115,7 +115,7 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
 
     # Find range of local halos at each snapshot
     message("Identifying halos at each snapshot")
-    unique_snap, snap_offset, snap_count = np.unique(halo_lightcone_data["SnapNum"],
+    unique_snap, snap_offset, snap_count = np.unique(halo_lightcone_data["Lightcone/SnapshotNumber"],
                                                      return_index=True, return_counts=True)
 
     # Find full range of snapshots across all MPI ranks
@@ -136,7 +136,7 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
         snap_count_all[i] = sc
 
     # Allocate storage for radius of each lightcone halo
-    nr_halos = len(halo_lightcone_data["ID"])
+    nr_halos = len(halo_lightcone_data["InputHalos/HaloCatalogueIndex"])
     halo_lightcone_data[radius_name] = None # Don't know dtype for radius array yet
 
     # Loop over snapshots
@@ -180,7 +180,7 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
         message("Finding lightcone halos in SOAP output")
         i1 = snap_offset_all[snapnum-min_snap]
         i2 = snap_offset_all[snapnum-min_snap] + snap_count_all[snapnum-min_snap]
-        assert np.all(halo_lightcone_data["SnapNum"][i1:i2] == snapnum)
+        assert np.all(halo_lightcone_data["Lightcone/SnapshotNumber"][i1:i2] == snapnum)
 
         # WILL UPDATES: we have already done the matching step by reading in the "InputHalos/SOAPIndex" so we can replace it
         #ptr = psort.parallel_match(halo_lightcone_data["ID"][i1:i2], soap_data["VR/ID"], comm=comm)
@@ -218,7 +218,8 @@ def read_lightcone_index(args):
     """
     
     # Particle types which may be in the lightcone:
-    type_names = ("BH", "DM", "Gas", "Neutrino", "Stars") # WILL UPDATES: remove the particle types you don't care about
+    #type_names = ("BH", "DM", "Gas", "Neutrino", "Stars") # WILL UPDATES: remove the particle types you don't care about
+    type_names = ("BH", "Gas", "Stars") # WILL UPDATES: remove the particle types you don't care about
 
     type_z_range = {}
 
@@ -560,8 +561,8 @@ def main(args):
             "HaloMass" : part_halo_mass,
         }
         attributes = {
-            "IndexInHaloLightcone" : halo_lightcone_data["ID"].attrs,
-            "FractionalRadius" : halo_lightcone_data["ID"].attrs,
+            "IndexInHaloLightcone" : halo_lightcone_data["InputHalos/HaloCatalogueIndex"].attrs,
+            "FractionalRadius" : halo_lightcone_data["InputHalos/HaloCatalogueIndex"].attrs,
             "HaloMass" : halo_lightcone_data[mass_name].attrs,
         }
         mf.write(datasets, elements_per_file, output_filenames, mode,
