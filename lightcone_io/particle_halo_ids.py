@@ -144,10 +144,10 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
 
         # WILL UPDATES: this will have to be updated to work with HBT-SOAP. 
         #       If you are not using a soap parameter for the radius_name, you should not remove the radius_name from the soap_datasets list, but istead we will use a set radius for its attributes. 
-        #       e.g. soap_datasets = ("InputHalos/HaloCatalogueIndex", "BoundSubhalo/EncloseRadius", mass_name)
+        soap_datasets = ("InputHalos/HaloCatalogueIndex", "BoundSubhalo/EncloseRadius", mass_name)
         # Datasets to read from SOAP
         #soap_datasets = ("VR/ID", radius_name, mass_name) 
-        soap_datasets = ("InputHalos/HaloCatalogueIndex", radius_name, mass_name)
+        #soap_datasets = ("InputHalos/HaloCatalogueIndex", radius_name, mass_name)
 
 
 
@@ -157,12 +157,12 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
         soap_data = mf.read(soap_datasets, read_attributes=True)
 
         # WILL UPDATES: if using physical distance for radius instead of SOAP property
-        #       nr_haloes = len(soap_data["InputHalos/HaloCatalogueIndex"])
-        #       soap_data["SearchRadius"] = np.ones(len(nr_haloes)) * physical_radius * soap_data["BoundSubhalo/EncloseRadius"].units
+        #nr_haloes = len(soap_data["InputHalos/HaloCatalogueIndex"])
+        #soap_data["SearchRadius"] = np.ones(len(nr_haloes)) * physical_radius * soap_data["BoundSubhalo/EncloseRadius"].units
         #for k, v in soap_data["BoundSubhalo/EncloseRadius"].attrs.items():
-        #   soap_data["SearchRadius"].attrs[k]=v
-        # del soap_data["BoundSubhalo/EncloseRadius"]
-        # radius_name="SearchRadius" # update radius_name
+        #    soap_data["SearchRadius"].attrs[k]=v
+        #    del soap_data["BoundSubhalo/EncloseRadius"]
+        #radius_name="SearchRadius" # update radius_name
 
         # Get the expansion factor of this snapshot
         if comm_rank == 0:
@@ -219,7 +219,8 @@ def read_lightcone_index(args):
     
     # Particle types which may be in the lightcone:
     #type_names = ("BH", "DM", "Gas", "Neutrino", "Stars") # WILL UPDATES: remove the particle types you don't care about
-    type_names = ("BH", "Gas", "Stars") # WILL UPDATES: remove the particle types you don't care about
+    #type_names = ("BH", "Gas", "Stars") # WILL UPDATES: remove the particle types you don't care about
+    type_names = ("Stars") # WILL UPDATES: remove the particle types you don't care about
 
     type_z_range = {}
 
