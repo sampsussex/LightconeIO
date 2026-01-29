@@ -423,29 +423,13 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
     # SAM SKIPPING UPDATE
     # If this rank received no halos, we can skip KDTree & halo loop.
     # Output arrays remain at defaults: id=-1, mass=-1, r_frac=-1 for all particles.
-    if local_nhalos == 0:
-        nr_parts = part_pos.shape[0]
-        part_halo_id = -np.ones(nr_parts, dtype=np.int64)
-        part_halo_mass = -np.ones(nr_parts, dtype=np.float32)
-        part_halo_r_frac = -np.ones(nr_parts, dtype=np.float32)
+    skip_computation = (local_nhalos == 0)
 
-        # Tidy up and restore original ordering (same as normal path)
-        del halo_id, halo_pos, halo_radius, halo_mass, part_pos
-
-        message("Restoring particle order")
-        order = psort.parallel_sort(part_index, return_index=True, comm=comm)
-        del part_index
-        psort.fetch_elements(part_halo_id, order, result=part_halo_id, comm=comm)
-        psort.fetch_elements(part_halo_mass, order, result=part_halo_mass, comm=comm)
-        psort.fetch_elements(part_halo_r_frac, order, result=part_halo_r_frac, comm=comm)
-
-        return part_halo_id, part_halo_mass, part_halo_r_frac
-    # END OF SAM SKIPPING UPDATE
-
-    # Build a kdtree with the local particles
-    message("Building kdtree")
-    tree = scipy.spatial.KDTree(part_pos)
-
+    if not skip_computation:
+        # Build a kdtree with the local particles
+        message("Building kdtree")
+        tree = scipy.spatial.KDTree(part_pos)
+    
     # Allocate output array for the particle halo IDs etc
     nr_parts = part_pos.shape[0]
     part_halo_id = -np.ones(nr_parts, dtype=np.int64)       # ID of halo particle is assigned to
@@ -456,61 +440,61 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
     else:
         # Looking for most massive halo or not using mass, so initialize mass to -1
         part_halo_mass[:] = -1
-    part_halo_r_frac_2 = -np.ndarray(nr_parts, dtype=np.float32) # Smallest ((Particle radius)/(halo r200))**2 so far
-    part_halo_r_frac_2[:] = np.finfo(part_halo_r_frac_2.dtype).max  # Initialize min. fractional radius to huge value
+    part_halo_r_frac_2 = np.empty(nr_parts, dtype=np.float32)
+    part_halo_r_frac_2[:] = np.finfo(np.float32).max
 
     # Report maximum halo radius
-    #max_radius = comm.allreduce(np.amax(halo_radius), op=MPI.MAX) SAM UPDATE: made safter
     local_max_radius = float(np.max(halo_radius)) if halo_radius.size > 0 else -np.inf
     max_radius = comm.allreduce(local_max_radius, op=MPI.MAX)
     message(f"Maximum halo radius = {max_radius}")
 
-    # Loop over local halos
+    # Loop over local halos (skip if this rank has no halos)
     nr_assigned = 0
-    message("Assigning halo IDs to particles")
-    for i in range(len(halo_id)):
+    if not skip_computation:
+        message("Assigning halo IDs to particles")
+        for i in range(len(halo_id)):
             
-        # Identify particles within this halo's radius
-        idx = np.asarray(tree.query_ball_point(halo_pos[i,:], halo_radius[i]), dtype=int)
+            # Identify particles within this halo's radius
+            idx = np.asarray(tree.query_ball_point(halo_pos[i,:], halo_radius[i]), dtype=int)
 
-        # Compute radius squared for each particle
-        r_part_2 = np.sum((part_pos[idx,:] - halo_pos[i,:])**2.0, axis=1)
-        
-        # Compute ((particle radius)/(halo radius))**2
+            # Compute radius squared for each particle
+            r_part_2 = np.sum((part_pos[idx,:] - halo_pos[i,:])**2.0, axis=1)
+            
+            # Compute ((particle radius)/(halo radius))**2
 
-        r_frac_2 = r_part_2 / (halo_radius[i]**2) 
-        
-        # Identify particles to update
-        if overlap_method == FRACTIONAL_RADIUS:
-            # Assign particles to this halo if (particle radius)/(halo radius) is smaller
-            # than the smallest value so far
-            to_update = (r_frac_2 < part_halo_r_frac_2[idx])
-        elif overlap_method == MOST_MASSIVE:
-            # Assign particles to this halo if this is the most massive halo the particle
-            # has been found to be in so far
-            to_update = (halo_mass[i] > part_halo_mass[idx])
-        elif overlap_method == LEAST_MASSIVE:
-            # Assign particles to this halo if this is the least massive halo the particle
-            # has been found to be in so far
-            to_update = (halo_mass[i] < part_halo_mass[idx])
-        elif overlap_method == MASS_WEIGHTED: # WILL UPDATES
-            # Assign particles to this halo if (particle radius)/(halo mass) is smaller
-            # than the smallest value so far
-            r_part_2_no_frac = r_part_2 * (halo_radius[i]**2)
-            other_halo_mass = part_halo_mass[idx] 
-            other_halo_mass[other_halo_mass < -1] = 0 # include to account for -1 vaues of halo masses that have not been assigned yet.
-            to_update = ((r_part_2_no_frac/halo_mass[i]) < (r_part_2_no_frac/part_halo_mass[idx])) 
-            del r_part_2_no_frac
-            del other_halo_mass
-        else:
-            raise ValueError("Unrecognized value of overlap_method")        
-        idx = idx[to_update]
+            r_frac_2 = r_part_2 / (halo_radius[i]**2) 
+            
+            # Identify particles to update
+            if overlap_method == FRACTIONAL_RADIUS:
+                # Assign particles to this halo if (particle radius)/(halo radius) is smaller
+                # than the smallest value so far
+                to_update = (r_frac_2 < part_halo_r_frac_2[idx])
+            elif overlap_method == MOST_MASSIVE:
+                # Assign particles to this halo if this is the most massive halo the particle
+                # has been found to be in so far
+                to_update = (halo_mass[i] > part_halo_mass[idx])
+            elif overlap_method == LEAST_MASSIVE:
+                # Assign particles to this halo if this is the least massive halo the particle
+                # has been found to be in so far
+                to_update = (halo_mass[i] < part_halo_mass[idx])
+            elif overlap_method == MASS_WEIGHTED: # WILL UPDATES
+                # Assign particles to this halo if (particle radius)/(halo mass) is smaller
+                # than the smallest value so far
+                r_part_2_no_frac = r_part_2 * (halo_radius[i]**2)
+                other_halo_mass = part_halo_mass[idx] 
+                other_halo_mass[other_halo_mass < -1] = 0 # include to account for -1 vaues of halo masses that have not been assigned yet.
+                to_update = ((r_part_2_no_frac/halo_mass[i]) < (r_part_2_no_frac/part_halo_mass[idx])) 
+                del r_part_2_no_frac
+                del other_halo_mass
+            else:
+                raise ValueError("Unrecognized value of overlap_method")        
+            idx = idx[to_update]
 
-        # Tag particles to update with the halo ID, mass and fractional radius
-        part_halo_id[idx]       = halo_id[i]
-        part_halo_mass[idx]     = halo_mass[i]
-        part_halo_r_frac_2[idx] = r_frac_2[to_update]
-        nr_assigned            += len(idx)
+            # Tag particles to update with the halo ID, mass and fractional radius
+            part_halo_id[idx]       = halo_id[i]
+            part_halo_mass[idx]     = halo_mass[i]
+            part_halo_r_frac_2[idx] = r_frac_2[to_update]
+            nr_assigned            += len(idx)
 
     nr_assigned_tot = comm.allreduce(nr_assigned)
     fraction_assigned = nr_assigned_tot / nr_particles_total
