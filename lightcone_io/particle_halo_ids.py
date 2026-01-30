@@ -66,7 +66,7 @@ def read_lightcone_halo_positions_and_radii(args, radius_name, mass_name):
 
     halo_lightcone_datasets = ("Lightcone/HaloCentre", "Lightcone/SnapshotNumber", "InputHalos/HaloCatalogueIndex","InputHalos/SOAPIndex") 
     #mf = phdf5.MultiFile(args.halo_lightcone_filenames, file_nr_attr=("Header", "NumberOfFiles"), comm=comm)  # Needs changing
-    first_snap_nr=73 # z = 0.2 snapshot of L1000N1800 sim
+    first_snap_nr=72 # z = 0.2 snapshot of L1000N1800 sim
     final_snap_nr=77 # z = 0 snapshot of L1000N1800 sim
     mf = phdf5.MultiFile(args.halo_lightcone_filenames, file_idx=np.arange(first_snap_nr, final_snap_nr+1), comm=comm)
 
@@ -651,17 +651,24 @@ def main(args):
     #
     message("Reading lightcone halo properties to copy to output particle files")
     halo_properties = (
-        "Subhalo/ID",
-        "Subhalo/SnapNum",
+        "BoundSubhalo/TotalMass",
+        "Lightcone/HaloCentre",
+        "Lightcone/Redshift"
+        "Lightcone/SnapshotNumber",
+        "InputHalos/HaloCatalogueIndex",
+        "InputHalos/SOAPIndex",
     )
     # mf_in = phdf5.MultiFile(args.halo_lightcone_filenames, file_nr_attr=("Header", "NumberOfFiles"), comm=comm) # needs changing to new file structure
 
-    first_snap_nr=73 # z = 0.2 snapshot of L1000N1800 sim
+    first_snap_nr=72 # z = 0.25 snapshot of L1000N1800 sim
     final_snap_nr=77 # z = 0 snapshot of L1000N1800 sim
     mf_in = phdf5.MultiFile(args.halo_lightcone_filenames, file_idx=np.arange(first_snap_nr, final_snap_nr+1), comm=comm)
 
     halo_lightcone_data = mf_in.read(halo_properties, read_attributes=True)
-    halo_lightcone_data["Subhalo/ID"] = halo_lightcone_data["Subhalo/ID"].astype(np.int64) # Avoid using unsigned int
+    #halo_lightcone_data["Subhalo/ID"] = halo_lightcone_data["Subhalo/ID"].astype(np.int64) # Avoid using unsigned int
+    halo_lightcone_data["InputHalos/HaloCatalogueIndex"] = halo_lightcone_data["InputHalos/HaloCatalogueIndex"].astype(np.int64) # Avoid using unsigned int
+    halo_lightcone_data["InputHalos/SOAPIndex"] = halo_lightcone_data["InputHalos/SOAPIndex"].astype(np.int64) # Avoid using unsigned int
+
 
     # Open the set of particle files to update
     mf_out = phdf5.MultiFile(output_filenames, comm=comm)
