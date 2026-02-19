@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import time
+import gc
 t0 = time.time()
 
 import numpy as np
@@ -359,8 +360,10 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
     psort.my_alltoallv(halo_id, send_count, send_offset,
                        halo_id_recv, recv_count, recv_offset,
                        comm=comm)
+    del halo_id
     halo_id = halo_id_recv
     del halo_id_recv
+    gc.collect()
     comm.barrier()
 
     # Exchange halo radii
@@ -369,8 +372,10 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
     psort.my_alltoallv(halo_radius, send_count, send_offset,
                        halo_radius_recv, recv_count, recv_offset,
                        comm=comm)
+    del halo_radius
     halo_radius = halo_radius_recv
     del halo_radius_recv
+    gc.collect()
     comm.barrier()
 
     # Exchange halo masses
@@ -379,10 +384,12 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
     psort.my_alltoallv(halo_mass, send_count, send_offset,
                        halo_mass_recv, recv_count, recv_offset,
                        comm=comm)
+    del halo_mass
     halo_mass = halo_mass_recv
     del halo_mass_recv
+    gc.collect()
     comm.barrier()
-    
+
     # Exchange halo positions:
     # These are vectors so flatten, exchange then restore shape
     message("Exchanging halo positions")
@@ -391,9 +398,11 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
     psort.my_alltoallv(halo_pos, send_count*3, send_offset*3,
                        halo_pos_recv, recv_count*3, recv_offset*3,
                        comm=comm)
+    del halo_pos
     halo_pos = halo_pos_recv
     halo_pos.shape = (-1, 3)
     del halo_pos_recv
+    gc.collect()
     comm.barrier()
 
     # --- SAM DEBUGGING UPDATE: how often do ranks get zero halos after exchange? ---
@@ -507,6 +516,7 @@ def compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part
     del halo_radius
     del halo_mass
     del part_pos
+    gc.collect()
 
     # Return r_frac=r/r200 for particles in halos and -1 for those not in halos
     in_halo = (part_halo_id >= 0)
@@ -601,10 +611,7 @@ def main(args):
         halo_mass = halo_lightcone_data[mass_name]
         part_halo_id, part_halo_mass, part_halo_r_frac = compute_particle_group_index(halo_id, halo_pos, halo_radius, halo_mass, part_pos, overlap_method)
         del part_pos
-        del halo_id
-        del halo_pos
-        del halo_radius
-        del halo_mass
+
 
         # Restore original partitioning of particles
         part_halo_id = psort.repartition(part_halo_id, ndesired=nr_parts_per_rank_read, comm=comm)
@@ -631,6 +638,7 @@ def main(args):
         del part_halo_id
         del part_halo_r_frac
         del part_halo_mass
+        gc.collect()
 
         # Only need to create new output files for the first type
         create_files = False
@@ -640,7 +648,7 @@ def main(args):
     # Discard reordered halo lightcone data
     del halo_lightcone_data
     del mf
-
+    gc.collect()
     #
     # Now, for each particle in the lightcone we have the index in the halo
     # lightcone of the halo it belongs to.
@@ -653,7 +661,7 @@ def main(args):
     halo_properties = (
         "BoundSubhalo/TotalMass",
         "Lightcone/HaloCentre",
-        "Lightcone/Redshift"
+        "Lightcone/Redshift",
         "Lightcone/SnapshotNumber",
         "InputHalos/HaloCatalogueIndex",
         "InputHalos/SOAPIndex",
@@ -692,6 +700,8 @@ def main(args):
             mf_out.write({dataset_name : prop_data}, elements_per_file, output_filenames, "r+",
                          attrs={dataset_name : halo_lightcone_data[prop_name].attrs},
                          gzip=6, shuffle=True)
+            
+    del mf_in, halo_lightcone_data
 
     
 if __name__ == "__main__":
