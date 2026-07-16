@@ -4,11 +4,17 @@
 #
 # Main changes relative to the original:
 #
-#  1. BATCHED PROCESSING: particle files are processed in batches grouped by
-#     file_nr (i.e. by shell/redshift), so peak memory is set by
-#     --files-per-batch instead of by the total lightcone size. The halo
-#     catalogue is pre-filtered per batch to the comoving distance range the
-#     batch's particles can actually reach (min AND max bounds).
+#  1. BATCHED PROCESSING: particle files are processed in batches of
+#     --files-per-batch files, so peak memory is set by the batch size
+#     instead of by the total lightcone size. (Batches are a plain chunking
+#     of the file list: with one file per writing rank, grouping by file_nr
+#     is meaningless.)
+#
+#  1b. PARTICLE DISTANCE CUT: particles beyond the reach of any halo in the
+#     halo lightcone (max comoving distance + search radius) are dropped
+#     immediately after reading and written out with id=-1. With BH
+#     particles to z=15 and halos only to z~0.2, this removes ~99.9% of the
+#     BH working set before any sorting/exchanging happens.
 #
 #  2. float32 POSITIONS: particle and halo positions are cast to float32
 #     (~60 pc absolute precision at 1 Gpc -- negligible vs halo radii).
@@ -269,8 +275,10 @@ def read_lightcone_index(args):
             nr_mpi_ranks = int(lc.attrs["nr_mpi_ranks"])
             final_file_on_rank = lc.attrs["final_particle_file_on_rank"]
             for tn in type_names:
-                min_z = float(lc.attrs["minimum_redshift_"+tn])
-                max_z = float(lc.attrs["maximum_redshift_"+tn])
+                # np.ravel()[0] handles attrs stored as 1-element arrays
+                # (avoids the numpy >=1.25 deprecation warning)
+                min_z = float(np.ravel(lc.attrs["minimum_redshift_"+tn])[0])
+                max_z = float(np.ravel(lc.attrs["maximum_redshift_"+tn])[0])
                 if max_z > min_z:
                     type_z_range[tn] = (min_z, max_z)
     else:
@@ -284,25 +292,24 @@ def read_lightcone_index(args):
         min_z, max_z = type_z_range[name]
         message(f"have particles for type {name} from z={min_z} to z={max_z}")
 
-    # Group files by file_nr so that each group covers the same shells on
-    # every writing rank, then accumulate whole groups into batches of at
-    # least args.files_per_batch files.
-    max_file_nr = int(np.max(final_file_on_rank))
-    file_batches = []
-    current = []
-    for file_nr in range(max_file_nr+1):
-        group = []
-        for rank_nr in range(nr_mpi_ranks):
-            if file_nr <= final_file_on_rank[rank_nr]:
-                filename = (f"{args.lightcone_dir}/{args.lightcone_base}_particles/"
-                            f"{args.lightcone_base}_{file_nr:04d}.{rank_nr}.hdf5")
-                group.append(filename)
-        current.extend(group)
-        if len(current) >= args.files_per_batch:
-            file_batches.append(current)
-            current = []
-    if len(current) > 0:
-        file_batches.append(current)
+    # Build the full file list, then chunk it into batches of
+    # args.files_per_batch files.
+    #
+    # NOTE: batches are NOT grouped by file_nr / shell. When the lightcone is
+    # written with one file per rank (file_nr = 0000 everywhere, as here),
+    # grouping by file_nr puts every file into one batch and defeats the
+    # batching entirely. Each file spans the full redshift range of its
+    # writing rank, so memory is controlled purely by the number of files
+    # per batch; particles beyond the halo lightcone's reach are removed by
+    # the per-particle distance cut in main() instead.
+    all_particle_files = []
+    for rank_nr in range(nr_mpi_ranks):
+        for file_nr in range(final_file_on_rank[rank_nr]+1):
+            filename = (f"{args.lightcone_dir}/{args.lightcone_base}_particles/"
+                        f"{args.lightcone_base}_{file_nr:04d}.{rank_nr}.hdf5")
+            all_particle_files.append(filename)
+    file_batches = [all_particle_files[i:i+args.files_per_batch]
+                    for i in range(0, len(all_particle_files), args.files_per_batch)]
 
     nr_files_total = sum(len(b) for b in file_batches)
     message(f"Have {nr_files_total} particle files in {len(file_batches)} batches")
@@ -633,6 +640,21 @@ def main(args):
     halo_radius_all = halo_lightcone_data[radius_name]
     halo_mass_all = halo_lightcone_data[mass_name]
 
+    # Maximum comoving distance any halo's search sphere reaches. Particles
+    # beyond this can never be assigned to a halo, so they are dropped from
+    # the pipeline immediately after reading and just written out with -1.
+    # This matters a lot here: e.g. BH particles extend to z=15 while the
+    # halo lightcone stops at z~0.2, so only ~0.1% of the BH lightcone
+    # volume can overlap any halo.
+    if halo_pos_all.shape[0] > 0:
+        local_reach = float(np.amax(
+            np.sqrt(np.sum(halo_pos_all.astype(np.float64)**2, axis=1))
+            + halo_radius_all))
+    else:
+        local_reach = -np.inf
+    max_halo_reach = comm.allreduce(local_reach, op=MPI.MAX)
+    message(f"Maximum halo reach (comoving distance + search radius) = {max_halo_reach}")
+
     # ------------------------------------------------------------------
     # Pass 1: assign particles to halos, one batch of files at a time
     # ------------------------------------------------------------------
@@ -659,28 +681,56 @@ def main(args):
 
             # Record number of particles read from each file
             elements_per_file = mf.get_elements_per_file("Coordinates", group=ptype)
+            nr_parts_local_read = part_pos.shape[0]
+            nr_parts_total_read = comm.allreduce(nr_parts_local_read)
 
-            # Rebalance particle load between MPI ranks
-            nr_parts_per_rank_read = np.asarray(comm.allgather(part_pos.shape[0]), dtype=int)
-            nr_parts_total = np.sum(nr_parts_per_rank_read)
-            nr_parts_per_rank_balanced = np.zeros_like(nr_parts_per_rank_read)
-            nr_av = (nr_parts_total // comm_size)
-            nr_parts_per_rank_balanced[:] = nr_av
-            nr_parts_per_rank_balanced[:nr_parts_total % comm_size] += 1
-            assert np.sum(nr_parts_per_rank_balanced) == nr_parts_total
-            part_pos = psort.repartition(part_pos, ndesired=nr_parts_per_rank_balanced, comm=comm)
-
-            # Assign group indexes to the particles
-            part_halo_id, part_halo_r_frac = compute_particle_group_index(
-                halo_id_all, halo_pos_all, halo_radius_all, halo_mass_all,
-                part_pos, overlap_method,
-                tree_chunk_size=args.tree_chunk_size,
-                halo_query_batch=args.halo_query_batch)
+            # DISTANCE CUT: particles beyond the reach of any halo can never
+            # be assigned, so drop them here and never sort/exchange them.
+            # They keep the default id=-1, r_frac=-1 in the output.
+            part_dist2 = np.sum(part_pos.astype(np.float64)**2, axis=1)
+            near = part_dist2 < (max_halo_reach**2)
+            del part_dist2
+            near_pos = np.ascontiguousarray(part_pos[near])
             del part_pos
+            gc.collect()
 
-            # Restore original partitioning of particles
-            part_halo_id = psort.repartition(part_halo_id, ndesired=nr_parts_per_rank_read, comm=comm)
-            part_halo_r_frac = psort.repartition(part_halo_r_frac, ndesired=nr_parts_per_rank_read, comm=comm)
+            nr_near_per_rank_read = np.asarray(comm.allgather(near_pos.shape[0]), dtype=int)
+            nr_near_total = int(np.sum(nr_near_per_rank_read))
+            message(f"Particles within halo reach: {nr_near_total} of {nr_parts_total_read} "
+                    f"({nr_near_total/max(nr_parts_total_read,1):.2%})")
+
+            # Full-size output arrays in the read layout, default -1
+            part_halo_id = -np.ones(nr_parts_local_read, dtype=np.int64)
+            part_halo_r_frac = -np.ones(nr_parts_local_read, dtype=np.float32)
+
+            if nr_near_total > 0:
+
+                # Rebalance the near particles between MPI ranks
+                nr_near_balanced = np.zeros(comm_size, dtype=int)
+                nr_near_balanced[:] = nr_near_total // comm_size
+                nr_near_balanced[:nr_near_total % comm_size] += 1
+                assert np.sum(nr_near_balanced) == nr_near_total
+                near_pos = psort.repartition(near_pos, ndesired=nr_near_balanced, comm=comm)
+
+                # Assign group indexes to the near particles
+                near_halo_id, near_halo_r_frac = compute_particle_group_index(
+                    halo_id_all, halo_pos_all, halo_radius_all, halo_mass_all,
+                    near_pos, overlap_method,
+                    tree_chunk_size=args.tree_chunk_size,
+                    halo_query_batch=args.halo_query_batch)
+                del near_pos
+
+                # Restore read partitioning of the near subset and scatter
+                # the results back into the full arrays
+                near_halo_id = psort.repartition(near_halo_id, ndesired=nr_near_per_rank_read, comm=comm)
+                near_halo_r_frac = psort.repartition(near_halo_r_frac, ndesired=nr_near_per_rank_read, comm=comm)
+                part_halo_id[near] = near_halo_id
+                part_halo_r_frac[near] = near_halo_r_frac
+                del near_halo_id, near_halo_r_frac
+            else:
+                del near_pos
+            del near
+            gc.collect()
 
             # Write the output, appending to file if not the first type.
             # NOTE: no per-particle HaloMass here -- pass 2 writes TotalMass
@@ -793,8 +843,8 @@ if __name__ == "__main__":
     parser.add_argument('--overlap-method', type=str, default="fractional-radius",
                         choices=list(overlap_methods),
                         help="How to assign particles which are in overlapping halos")
-    parser.add_argument('--files-per-batch', type=int, default=64,
-                        help="Approx. number of particle files to process per batch "
+    parser.add_argument('--files-per-batch', type=int, default=24,
+                        help="Number of particle files to process per batch "
                              "(main memory knob: smaller = less memory)")
     parser.add_argument('--tree-chunk-size', type=int, default=5_000_000,
                         help="Max particles per KDTree built on each rank")
